@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { PlanView } from "@/components/plan-view";
+import { ContentView, type StoryItem } from "@/components/content-view";
 import type { AplusPlan } from "@/lib/plan";
 
 type ScrapedProduct = {
@@ -23,6 +24,7 @@ export function ScrapeForm() {
   const [error, setError] = useState<string | null>(null);
   const [scraped, setScraped] = useState<ScrapedProduct | null>(null);
   const [plan, setPlan] = useState<AplusPlan | null>(null);
+  const [story, setStory] = useState<StoryItem[] | null>(null);
 
   async function onScrape(e: React.FormEvent) {
     e.preventDefault();
@@ -31,6 +33,7 @@ export function ScrapeForm() {
     setError(null);
     setScraped(null);
     setPlan(null);
+    setStory(null);
     try {
       const res = await fetch("/api/scrape", {
         method: "POST",
@@ -55,6 +58,7 @@ export function ScrapeForm() {
     setPlanning(true);
     setError(null);
     setPlan(null);
+    setStory(null);
     try {
       const res = await fetch("/api/plan", {
         method: "POST",
@@ -78,6 +82,7 @@ export function ScrapeForm() {
     setInput("");
     setScraped(null);
     setPlan(null);
+    setStory(null);
     setError(null);
   }
 
@@ -124,10 +129,21 @@ export function ScrapeForm() {
         </div>
       )}
 
-      {plan && (
+      {plan && !story && (
         <div className="mt-6 space-y-6">
           {scraped && <ScrapedSummary scraped={scraped} collapsed />}
-          <PlanView plan={plan} />
+          <PlanView plan={plan} onGenerate={(items) => setStory(items)} />
+        </div>
+      )}
+
+      {story && plan && scraped && (
+        <div className="mt-6">
+          <ContentView
+            scraped={scraped}
+            analysis={plan.analysis}
+            story={story}
+            onBack={() => setStory(null)}
+          />
         </div>
       )}
     </div>

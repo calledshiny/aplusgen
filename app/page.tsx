@@ -7,7 +7,7 @@ export default function Home() {
       <div className="mx-auto max-w-3xl">
         <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-zinc-300 bg-white px-3 py-1 text-xs font-medium text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400">
           <span className="size-2 rounded-full bg-emerald-500" />
-          Phase 3 · Analyse + Modul-Auswahl
+          Phase 4 · Content-Generierung
         </div>
         <h1 className="mt-4 text-4xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
           A+ Content Generator

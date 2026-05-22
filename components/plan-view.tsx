@@ -47,7 +47,13 @@ function toItems(plan: AplusPlan): Item[] {
   }));
 }
 
-export function PlanView({ plan }: { plan: AplusPlan }) {
+export function PlanView({
+  plan,
+  onGenerate,
+}: {
+  plan: AplusPlan;
+  onGenerate?: (items: Array<{ id: string; module: import("@/lib/plan").SelectedModule }>) => void;
+}) {
   const [items, setItems] = useState<Item[]>(() => toItems(plan));
 
   const sensors = useSensors(
@@ -155,9 +161,27 @@ export function PlanView({ plan }: { plan: AplusPlan }) {
 
       <div className="flex items-center justify-between border-t border-zinc-200 pt-4 dark:border-zinc-800">
         <div className="text-xs text-zinc-500">
-          Phase 4 (Content-Generierung) ist noch nicht aktiv.
+          Storyline bestätigt? Claude generiert pro Modul Texte + Bild-Prompts.
         </div>
-        <Button disabled>Content generieren →</Button>
+        <Button
+          disabled={!onGenerate || items.length === 0}
+          onClick={() => {
+            if (!onGenerate) return;
+            onGenerate(
+              items.map((i) => ({
+                id: i.id,
+                module: {
+                  type: i.type,
+                  reasoning: i.reasoning,
+                  textInImage: i.textInImage,
+                  imageBrief: i.imageBrief,
+                },
+              })),
+            );
+          }}
+        >
+          Content generieren →
+        </Button>
       </div>
     </div>
   );
