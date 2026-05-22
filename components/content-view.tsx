@@ -26,6 +26,7 @@ import type {
 import type { ProductAnalysis, SelectedModule } from "@/lib/plan";
 import type { ScrapedProduct } from "@/lib/scraper";
 import { usePersistedState } from "@/lib/persisted-state";
+import { buildZip, type ExportSlot } from "@/lib/export";
 
 export type StoryItem = {
   id: string;
@@ -81,6 +82,12 @@ export function ContentView({
   const [running, setRunning] = useState(false);
   const [imagesRunning, setImagesRunning] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
+  const [zipping, setZipping] = useState(false);
+  const [zipProgress, setZipProgress] = useState<{
+    done: number;
+    total: number;
+    message?: string;
+  } | null>(null);
   const cancelRef = useRef(false);
   // synchroner Lock gegen Doppel-Klick auf "Bilder generieren"
   const imagesLockRef = useRef(false);
@@ -488,14 +495,51 @@ export function ContentView({
     return JSON.stringify(payload, null, 2);
   }, [analysis, scraped.url, slots]);
 
-  function downloadJson() {
-    const blob = new Blob([exportJson], { type: "application/json" });
+  function downloadBlob(blob: Blob, filename: string) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `aplus-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")}.json`;
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  function timestamp(): string {
+    return new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
+  }
+
+  function downloadJson() {
+    downloadBlob(
+      new Blob([exportJson], { type: "application/json" }),
+      `aplus-${timestamp()}.json`,
+    );
+  }
+
+  async function downloadZip() {
+    if (zipping) return;
+    setZipping(true);
+    setLastError(null);
+    setZipProgress({ done: 0, total: 0, message: "Sammle Bilder…" });
+    try {
+      const exportSlots: ExportSlot[] = slotsRef.current.map((s) => ({
+        module: s.item.module,
+        generated: s.generated ?? null,
+      }));
+      const blob = await buildZip(
+        { scraped, analysis, slots: exportSlots },
+        {
+          onProgress: (done, total, message) =>
+            setZipProgress({ done, total, message }),
+        },
+      );
+      downloadBlob(blob, `aplus-${timestamp()}.zip`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setLastError(`ZIP-Export fehlgeschlagen: ${message}`);
+    } finally {
+      setZipping(false);
+      setZipProgress(null);
+    }
   }
 
   return (
@@ -539,8 +583,20 @@ export function ContentView({
                 ? "Bilder generieren"
                 : "Restliche Bilder"}
           </Button>
-          <Button type="button" variant="secondary" onClick={downloadJson}>
-            JSON exportieren
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={downloadZip}
+            disabled={zipping || done === 0}
+          >
+            {zipping
+              ? zipProgress && zipProgress.total > 0
+                ? `ZIP… ${zipProgress.done}/${zipProgress.total}`
+                : "ZIP…"
+              : "ZIP exportieren"}
+          </Button>
+          <Button type="button" variant="ghost" onClick={downloadJson}>
+            JSON
           </Button>
           <Button
             type="button"
