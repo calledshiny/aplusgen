@@ -25,6 +25,7 @@ import type {
 } from "@/lib/content";
 import type { ProductAnalysis, SelectedModule } from "@/lib/plan";
 import type { ScrapedProduct } from "@/lib/scraper";
+import { usePersistedState } from "@/lib/persisted-state";
 
 export type StoryItem = {
   id: string;
@@ -44,20 +45,45 @@ export function ContentView({
   scraped,
   analysis,
   story,
+  persistenceKey,
   onBack,
 }: {
   scraped: ScrapedProduct;
   analysis: ProductAnalysis;
   story: StoryItem[];
+  persistenceKey: string;
   onBack: () => void;
 }) {
-  const [slots, setSlots] = useState<SlotState[]>(() =>
-    story.map((item) => ({ item, status: "pending" })),
+  const initialSlots = useMemo<SlotState[]>(
+    () => story.map((item) => ({ item, status: "pending" })),
+    [story],
   );
+  const [slots, setSlots] = usePersistedState<SlotState[]>(
+    persistenceKey,
+    initialSlots,
+  );
+
+  // Restored slots aus localStorage könnten zu einer alten Story gehören
+  // (User hat Plan editiert, dann zurück → vorwärts mit anderen Module-Typen).
+  // Wir gleichen Anzahl + Typ ab; bei Mismatch reset auf pending.
+  useEffect(() => {
+    const sigStory = story.map((s) => s.module.type).join("|");
+    const sigSlots = slots.map((s) => s.item.module.type).join("|");
+    if (
+      slots.length !== story.length ||
+      sigStory !== sigSlots
+    ) {
+      setSlots(initialSlots);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [story]);
+
   const [running, setRunning] = useState(false);
   const [imagesRunning, setImagesRunning] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
   const cancelRef = useRef(false);
+  // synchroner Lock gegen Doppel-Klick auf "Bilder generieren"
+  const imagesLockRef = useRef(false);
 
   // Ref hält IMMER den aktuellen state-Snapshot — ohne async-Lag wie bei
   // setSlots-Updater-Trick. Sync mit jedem Render.
@@ -214,14 +240,23 @@ export function ContentView({
     cancelRef.current = false;
     for (let i = 0; i < story.length; i++) {
       if (cancelRef.current) break;
+      // Resume: bereits done Module nicht neu generieren
+      const current = slotsRef.current[i];
+      if (current?.status === "done" || current?.status === "generating") {
+        continue;
+      }
       await generateOne(i);
     }
     setRunning(false);
   }, [generateOne, story.length]);
 
-  // Auto-start text generation on mount
+  // Auto-start text generation on mount — startet automatisch nur wenn
+  // mindestens ein Slot noch nicht "done" ist.
   useEffect(() => {
-    void runAll();
+    const needsWork = slotsRef.current.some(
+      (s) => s.status !== "done",
+    );
+    if (needsWork) void runAll();
     return () => {
       cancelRef.current = true;
     };
@@ -356,18 +391,24 @@ export function ContentView({
   );
 
   const runAllImages = useCallback(async () => {
-    if (imagesRunning) return;
+    // Synchroner Lock — schützt vor Doppel-Klick-Race (setState wäre zu spät).
+    if (imagesLockRef.current) return;
+    imagesLockRef.current = true;
     setImagesRunning(true);
     setLastError(null);
     cancelRef.current = false;
-    const all = slotsRef.current;
-    for (let i = 0; i < all.length; i++) {
-      if (cancelRef.current) break;
-      if (slotsRef.current[i]?.status !== "done") continue;
-      await generateImagesForSlot(i);
+    try {
+      const all = slotsRef.current;
+      for (let i = 0; i < all.length; i++) {
+        if (cancelRef.current) break;
+        if (slotsRef.current[i]?.status !== "done") continue;
+        await generateImagesForSlot(i);
+      }
+    } finally {
+      imagesLockRef.current = false;
+      setImagesRunning(false);
     }
-    setImagesRunning(false);
-  }, [generateImagesForSlot, imagesRunning]);
+  }, [generateImagesForSlot]);
 
   const regenerateOneImage = useCallback(
     async (

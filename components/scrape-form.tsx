@@ -5,6 +5,14 @@ import { Button } from "@/components/ui/button";
 import { PlanView } from "@/components/plan-view";
 import { ContentView, type StoryItem } from "@/components/content-view";
 import type { AplusPlan } from "@/lib/plan";
+import { clearPersistedState, usePersistedState } from "@/lib/persisted-state";
+
+const LS = {
+  input: "aplus.input",
+  scraped: "aplus.scraped",
+  plan: "aplus.plan",
+  story: "aplus.story",
+};
 
 type ScrapedProduct = {
   title: string;
@@ -18,13 +26,19 @@ type ScrapedProduct = {
 };
 
 export function ScrapeForm() {
-  const [input, setInput] = useState("");
+  const [input, setInput] = usePersistedState<string>(LS.input, "");
   const [scraping, setScraping] = useState(false);
   const [planning, setPlanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [scraped, setScraped] = useState<ScrapedProduct | null>(null);
-  const [plan, setPlan] = useState<AplusPlan | null>(null);
-  const [story, setStory] = useState<StoryItem[] | null>(null);
+  const [scraped, setScraped] = usePersistedState<ScrapedProduct | null>(
+    LS.scraped,
+    null,
+  );
+  const [plan, setPlan] = usePersistedState<AplusPlan | null>(LS.plan, null);
+  const [story, setStory] = usePersistedState<StoryItem[] | null>(
+    LS.story,
+    null,
+  );
 
   async function onScrape(e: React.FormEvent) {
     e.preventDefault();
@@ -84,6 +98,19 @@ export function ScrapeForm() {
     setPlan(null);
     setStory(null);
     setError(null);
+    // Persistierten Slot-State der Content-View auch wegräumen
+    if (typeof window !== "undefined") {
+      try {
+        for (const key of Object.keys(window.localStorage)) {
+          if (key.startsWith("aplus.slots.")) {
+            window.localStorage.removeItem(key);
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    clearPersistedState(LS.input, LS.scraped, LS.plan, LS.story);
   }
 
   return (
@@ -142,6 +169,7 @@ export function ScrapeForm() {
             scraped={scraped}
             analysis={plan.analysis}
             story={story}
+            persistenceKey={`aplus.slots.${scraped.url}`}
             onBack={() => setStory(null)}
           />
         </div>

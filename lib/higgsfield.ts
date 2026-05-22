@@ -51,7 +51,7 @@ export function selectModel(_opts: {
 }
 
 // --- Spawn-Helper --------------------------------------------------------
-function runCli(args: string[], timeoutMs: number): Promise<unknown> {
+function runCliOnce(args: string[], timeoutMs: number): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const child = spawn(CLI, [...args, "--json"], { windowsHide: true });
     let stdout = "";
@@ -100,6 +100,41 @@ function runCli(args: string[], timeoutMs: number): Promise<unknown> {
       }
     });
   });
+}
+
+// Globaler in-process Lock: nur EIN hf.exe-Prozess gleichzeitig.
+// Windows zickt sonst gerne mit EPERM/EBUSY wenn der Antivirus
+// (oder der Filesystem-Lock) parallele Spawns blockt.
+let cliQueue: Promise<unknown> = Promise.resolve();
+
+async function runCli(args: string[], timeoutMs: number): Promise<unknown> {
+  const previous = cliQueue;
+  let release: () => void = () => {};
+  cliQueue = new Promise<void>((r) => (release = r));
+
+  try {
+    await previous.catch(() => undefined);
+
+    // Retry-Loop für transientes Windows-Spawn-Geraschel (EPERM/EBUSY).
+    const transientPatterns = ["EPERM", "EBUSY", "EACCES", "ETXTBSY"];
+    const maxAttempts = 3;
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        return await runCliOnce(args, timeoutMs);
+      } catch (err) {
+        lastErr = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        const transient = transientPatterns.some((p) => msg.includes(p));
+        if (!transient || attempt === maxAttempts - 1) throw err;
+        const backoff = 250 * 2 ** attempt; // 250, 500, 1000 ms
+        await new Promise((r) => setTimeout(r, backoff));
+      }
+    }
+    throw lastErr;
+  } finally {
+    release();
+  }
 }
 
 // --- Download + Temp-Datei ----------------------------------------------
