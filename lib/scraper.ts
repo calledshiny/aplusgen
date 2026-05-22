@@ -162,51 +162,48 @@ export async function scrapeAmazon(url: string): Promise<ScrapedProduct> {
         }
       });
 
-      // Bilder — NUR aus der offiziellen Produktgalerie (#imageBlock /
-      // #main-image-container / #altImages). Damit ignorieren wir
-      // "Sponsored", "Kunden kauften auch", "From the brand" usw.
+      // Bilder — autoritative Quelle ist die Thumbnail-Leiste (#altImages).
+      // Jedes Thumbnail entspricht genau einem Produktbild; der große
+      // "Display"-Bereich ist nur die hochaufgelöste Variante des aktuell
+      // ausgewählten Thumbnails (mit ABWEICHENDER Amazon-Image-ID — würde
+      // sonst als Duplikat reinrutschen). Falls keine Thumbnails existieren
+      // (Single-Image-Produkt), Fallback auf das Hauptbild.
       const imageUrls = new Set<string>();
 
-      const galleryRoots = [
-        "#imageBlock",
-        "#main-image-container",
-        "#altImages",
-        "#imgTagWrapperId",
-      ]
-        .map((sel) => document.querySelector(sel))
-        .filter((el): el is Element => el !== null);
+      const thumbs = Array.from(
+        document.querySelectorAll(
+          "#altImages li.item.imageThumbnail img, #altImages li.item img.a-button-thumbnail-image",
+        ),
+      )
+        .map((img) => img.getAttribute("src"))
+        .filter((s): s is string => !!s);
 
-      const pickFromDynamicImage = (img: Element) => {
-        const raw = img.getAttribute("data-a-dynamic-image");
-        if (!raw) return null;
-        try {
-          const map = JSON.parse(raw) as Record<string, [number, number]>;
-          let best: { url: string; area: number } | null = null;
-          for (const [u, dims] of Object.entries(map)) {
-            const area = (dims[0] ?? 0) * (dims[1] ?? 0);
-            if (!best || area > best.area) best = { url: u, area };
+      if (thumbs.length > 0) {
+        thumbs.forEach((src) => imageUrls.add(src));
+      } else {
+        // Single-Image-Produkt: aus data-a-dynamic-image die größte Variante ziehen
+        const mainImg = document.querySelector(
+          "#main-image-container img[data-a-dynamic-image], #imgTagWrapperId img[data-a-dynamic-image]",
+        );
+        if (mainImg) {
+          const raw = mainImg.getAttribute("data-a-dynamic-image");
+          if (raw) {
+            try {
+              const map = JSON.parse(raw) as Record<string, [number, number]>;
+              let best: { url: string; area: number } | null = null;
+              for (const [u, dims] of Object.entries(map)) {
+                const area = (dims[0] ?? 0) * (dims[1] ?? 0);
+                if (!best || area > best.area) best = { url: u, area };
+              }
+              if (best) imageUrls.add(best.url);
+            } catch {
+              /* ignore */
+            }
           }
-          return best?.url ?? null;
-        } catch {
-          return null;
         }
-      };
-
-      for (const root of galleryRoots) {
-        // data-a-dynamic-image bevorzugt (höchste Auflösung)
-        root.querySelectorAll("img[data-a-dynamic-image]").forEach((img) => {
-          const u = pickFromDynamicImage(img);
-          if (u) imageUrls.add(u);
-        });
-        // Thumbnails als Fallback (werden später via toHiRes hochskaliert)
-        root
-          .querySelectorAll(
-            "li.item img, img.a-button-thumbnail-image, #landingImage",
-          )
-          .forEach((img) => {
-            const src = img.getAttribute("src");
-            if (src) imageUrls.add(src);
-          });
+        const landing = document.querySelector("#landingImage");
+        const landingSrc = landing?.getAttribute("src");
+        if (landingSrc) imageUrls.add(landingSrc);
       }
 
       // Marke
