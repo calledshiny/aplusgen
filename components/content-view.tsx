@@ -1,12 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from "react";
 import { Button } from "@/components/ui/button";
 import {
   MODULES_BY_TYPE,
   type AspectRatio,
   type FieldDef,
-  type ModuleType,
 } from "@/lib/modules";
 import type {
   FieldValue,
@@ -50,21 +56,110 @@ export function ContentView({
   );
   const [running, setRunning] = useState(false);
   const [imagesRunning, setImagesRunning] = useState(false);
+  const [lastError, setLastError] = useState<string | null>(null);
   const cancelRef = useRef(false);
 
-  // Default: erstes Produktbild als Referenz für alle Bild-Generierungen.
-  // (Spec sieht eigentlich User-Auswahl vor — V1 simpel.)
-  const refImageUrls = scraped.images.slice(0, 1);
+  // Ref hält IMMER den aktuellen state-Snapshot — ohne async-Lag wie bei
+  // setSlots-Updater-Trick. Sync mit jedem Render.
+  const slotsRef = useRef<SlotState[]>(slots);
+  useEffect(() => {
+    slotsRef.current = slots;
+  }, [slots]);
 
+  // Erstes Produktbild als Referenz für alle Bild-Generierungen (V1).
+  const refImageUrls = useMemo(() => scraped.images.slice(0, 1), [scraped.images]);
+
+  // --- State-Updater Helpers ------------------------------------------
+  const patchSlotField = useCallback(
+    (slotIndex: number, fieldId: string, updater: (v: FieldValue) => FieldValue) => {
+      setSlots((prev) =>
+        prev.map((s, i) => {
+          if (i !== slotIndex || !s.generated) return s;
+          const cur = s.generated.fields[fieldId];
+          if (!cur) return s;
+          return {
+            ...s,
+            generated: {
+              ...s.generated,
+              fields: { ...s.generated.fields, [fieldId]: updater(cur) },
+            },
+          };
+        }),
+      );
+    },
+    [],
+  );
+
+  // Editierbare Texte schreiben in den state zurück. Diese Werte landen
+  // auch im JSON-Export und werden bei „Neu generieren" ÜBERSCHRIEBEN —
+  // user-edits sind also nur stabil solange nicht regeneriert wird.
+  const setTextValue = useCallback(
+    (slotIndex: number, fieldId: string, value: string) =>
+      patchSlotField(slotIndex, fieldId, (v) => {
+        if (v.kind === "text" || v.kind === "richtext") return { ...v, value };
+        return v;
+      }),
+    [patchSlotField],
+  );
+
+  const setImagePrompt = useCallback(
+    (slotIndex: number, fieldId: string, prompt: string, itemIndex?: number) =>
+      patchSlotField(slotIndex, fieldId, (v) => {
+        if (v.kind === "image") return { ...v, prompt };
+        if (v.kind === "imageList" && itemIndex !== undefined) {
+          return {
+            ...v,
+            items: v.items.map((it, i) =>
+              i === itemIndex ? { ...it, prompt } : it,
+            ),
+          };
+        }
+        return v;
+      }),
+    [patchSlotField],
+  );
+
+  const setImageAlt = useCallback(
+    (slotIndex: number, fieldId: string, altText: string, itemIndex?: number) =>
+      patchSlotField(slotIndex, fieldId, (v) => {
+        if (v.kind === "image") return { ...v, altText };
+        if (v.kind === "imageList" && itemIndex !== undefined) {
+          return {
+            ...v,
+            items: v.items.map((it, i) =>
+              i === itemIndex ? { ...it, altText } : it,
+            ),
+          };
+        }
+        return v;
+      }),
+    [patchSlotField],
+  );
+
+  const setImageCaption = useCallback(
+    (slotIndex: number, fieldId: string, caption: string, itemIndex: number) =>
+      patchSlotField(slotIndex, fieldId, (v) => {
+        if (v.kind === "imageList") {
+          return {
+            ...v,
+            items: v.items.map((it, i) =>
+              i === itemIndex ? { ...it, caption } : it,
+            ),
+          };
+        }
+        return v;
+      }),
+    [patchSlotField],
+  );
+
+  // --- Text-Generierung ------------------------------------------------
   const generateOne = useCallback(
     async (index: number) => {
-      const slot = slots[index];
+      const slot = slotsRef.current[index];
       if (!slot) return;
       setSlots((prev) =>
         prev.map((s, i) =>
-          i === index
-            ? { ...s, status: "generating", error: undefined }
-            : s,
+          i === index ? { ...s, status: "generating", error: undefined } : s,
         ),
       );
       try {
@@ -111,24 +206,20 @@ export function ContentView({
         );
       }
     },
-    [analysis, scraped, slots],
+    [analysis, scraped],
   );
 
-  // Sequential generate-all loop. Triggered by useEffect on first mount.
   const runAll = useCallback(async () => {
-    if (running) return;
     setRunning(true);
     cancelRef.current = false;
     for (let i = 0; i < story.length; i++) {
       if (cancelRef.current) break;
-      // Re-read latest slot to avoid stale closure on slots[]; check status.
-      // We always (re)generate from where we are — used at start and on retry-all
       await generateOne(i);
     }
     setRunning(false);
-  }, [generateOne, running, story.length]);
+  }, [generateOne, story.length]);
 
-  // Auto-start on mount
+  // Auto-start text generation on mount
   useEffect(() => {
     void runAll();
     return () => {
@@ -138,31 +229,7 @@ export function ContentView({
   }, []);
 
   // --- Bild-Generierung ------------------------------------------------
-  const updateSlotField = useCallback(
-    (
-      slotIndex: number,
-      fieldId: string,
-      updater: (v: FieldValue) => FieldValue,
-    ) => {
-      setSlots((prev) =>
-        prev.map((s, i) => {
-          if (i !== slotIndex || !s.generated) return s;
-          const cur = s.generated.fields[fieldId];
-          if (!cur) return s;
-          return {
-            ...s,
-            generated: {
-              ...s.generated,
-              fields: { ...s.generated.fields, [fieldId]: updater(cur) },
-            },
-          };
-        }),
-      );
-    },
-    [],
-  );
-
-  const generateImageForSlot = useCallback(
+  const generateImageForField = useCallback(
     async (
       slotIndex: number,
       fieldId: string,
@@ -171,19 +238,24 @@ export function ContentView({
       textInImage: boolean,
       itemIndex?: number,
     ) => {
-      // status: generating
-      updateSlotField(slotIndex, fieldId, (v) => {
-        if (v.kind === "image") return { ...v, status: "generating" };
+      // status → generating
+      patchSlotField(slotIndex, fieldId, (v) => {
+        if (v.kind === "image")
+          return { ...v, status: "generating", src: undefined };
         if (v.kind === "imageList" && itemIndex !== undefined) {
           return {
             ...v,
             items: v.items.map((it, i) =>
-              i === itemIndex ? { ...it, status: "generating" } : it,
+              i === itemIndex
+                ? { ...it, status: "generating", src: undefined }
+                : it,
             ),
           };
         }
         return v;
       });
+
+      let errorDetail: string | null = null;
 
       try {
         const res = await fetch("/api/generate-image", {
@@ -199,76 +271,76 @@ export function ContentView({
         });
         const data = await res.json();
         if (!res.ok) {
-          const detail = data.detail || data.error || `HTTP ${res.status}`;
-          updateSlotField(slotIndex, fieldId, (v) => {
-            if (v.kind === "image") return { ...v, status: "error" };
+          errorDetail = data.detail || data.error || `HTTP ${res.status}`;
+        } else {
+          const url = (data as { url: string }).url;
+          patchSlotField(slotIndex, fieldId, (v) => {
+            if (v.kind === "image") return { ...v, src: url, status: "done" };
             if (v.kind === "imageList" && itemIndex !== undefined) {
               return {
                 ...v,
                 items: v.items.map((it, i) =>
-                  i === itemIndex ? { ...it, status: "error" } : it,
+                  i === itemIndex ? { ...it, src: url, status: "done" } : it,
                 ),
               };
             }
             return v;
           });
-          console.error("Image gen failed:", detail);
           return;
         }
-        const url = (data as { url: string }).url;
-        updateSlotField(slotIndex, fieldId, (v) => {
-          if (v.kind === "image")
-            return { ...v, src: url, status: "done" };
-          if (v.kind === "imageList" && itemIndex !== undefined) {
-            return {
-              ...v,
-              items: v.items.map((it, i) =>
-                i === itemIndex ? { ...it, src: url, status: "done" } : it,
-              ),
-            };
-          }
-          return v;
-        });
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error("Image gen exception:", message);
+        errorDetail = err instanceof Error ? err.message : String(err);
       }
+
+      // Error path
+      console.error("Image gen failed:", errorDetail);
+      setLastError(`Bild #${slotIndex + 1}${itemIndex !== undefined ? `.${itemIndex + 1}` : ""}: ${errorDetail}`);
+      patchSlotField(slotIndex, fieldId, (v) => {
+        if (v.kind === "image") return { ...v, status: "error" };
+        if (v.kind === "imageList" && itemIndex !== undefined) {
+          return {
+            ...v,
+            items: v.items.map((it, i) =>
+              i === itemIndex ? { ...it, status: "error" } : it,
+            ),
+          };
+        }
+        return v;
+      });
     },
-    [refImageUrls, updateSlotField],
+    [patchSlotField, refImageUrls],
   );
 
   const generateImagesForSlot = useCallback(
     async (slotIndex: number) => {
-      // Wir lesen aus dem aktuellen state via Closure — kann veraltet sein.
-      // Trick: setSlots-Callback um den aktuellen Snapshot zu kriegen.
-      let snapshot: SlotState[] = [];
-      setSlots((prev) => {
-        snapshot = prev;
-        return prev;
-      });
-      const slot = snapshot[slotIndex];
+      const slot = slotsRef.current[slotIndex];
       if (!slot?.generated) return;
       const def = MODULES_BY_TYPE[slot.item.module.type];
       const textInImage = slot.item.module.textInImage;
 
       for (const fdef of def.fields) {
-        const val = slot.generated.fields[fdef.id];
-        if (!val) continue;
+        if (cancelRef.current) return;
+        // Re-read from ref so we see updates from previous iterations
+        const fresh = slotsRef.current[slotIndex]?.generated?.fields[fdef.id];
+        if (!fresh) continue;
 
-        if (val.kind === "image") {
-          if (val.src) continue; // already done
-          await generateImageForSlot(
+        if (fresh.kind === "image") {
+          if (fresh.src) continue;
+          await generateImageForField(
             slotIndex,
             fdef.id,
-            val.prompt,
+            fresh.prompt,
             fdef.image?.aspectRatio,
             textInImage,
           );
-        } else if (val.kind === "imageList") {
-          for (let i = 0; i < val.items.length; i++) {
-            const it = val.items[i];
+        } else if (fresh.kind === "imageList") {
+          for (let i = 0; i < fresh.items.length; i++) {
+            if (cancelRef.current) return;
+            const fresh2 = slotsRef.current[slotIndex]?.generated?.fields[fdef.id];
+            if (fresh2?.kind !== "imageList") break;
+            const it = fresh2.items[i];
             if (it.src) continue;
-            await generateImageForSlot(
+            await generateImageForField(
               slotIndex,
               fdef.id,
               it.prompt,
@@ -280,26 +352,62 @@ export function ContentView({
         }
       }
     },
-    [generateImageForSlot],
+    [generateImageForField],
   );
 
   const runAllImages = useCallback(async () => {
     if (imagesRunning) return;
     setImagesRunning(true);
+    setLastError(null);
     cancelRef.current = false;
-    let snapshot: SlotState[] = [];
-    setSlots((prev) => {
-      snapshot = prev;
-      return prev;
-    });
-    for (let i = 0; i < snapshot.length; i++) {
+    const all = slotsRef.current;
+    for (let i = 0; i < all.length; i++) {
       if (cancelRef.current) break;
-      if (snapshot[i]?.status !== "done") continue;
+      if (slotsRef.current[i]?.status !== "done") continue;
       await generateImagesForSlot(i);
     }
     setImagesRunning(false);
   }, [generateImagesForSlot, imagesRunning]);
 
+  const regenerateOneImage = useCallback(
+    async (
+      slotIndex: number,
+      fieldId: string,
+      itemIndex?: number,
+    ) => {
+      const slot = slotsRef.current[slotIndex];
+      if (!slot?.generated) return;
+      const def = MODULES_BY_TYPE[slot.item.module.type];
+      const fdef = def.fields.find((f) => f.id === fieldId);
+      if (!fdef) return;
+      const textInImage = slot.item.module.textInImage;
+      const value = slot.generated.fields[fieldId];
+      if (!value) return;
+
+      if (value.kind === "image") {
+        await generateImageForField(
+          slotIndex,
+          fieldId,
+          value.prompt,
+          fdef.image?.aspectRatio,
+          textInImage,
+        );
+      } else if (value.kind === "imageList" && itemIndex !== undefined) {
+        const item = value.items[itemIndex];
+        await generateImageForField(
+          slotIndex,
+          fieldId,
+          item.prompt,
+          fdef.imageList?.itemImage.aspectRatio,
+          textInImage,
+          itemIndex,
+        );
+      }
+    },
+    [generateImageForField],
+  );
+
+  // --- Derived counts -------------------------------------------------
   const done = slots.filter((s) => s.status === "done").length;
   const total = slots.length;
   const imagesDone = slots.reduce((sum, s) => {
@@ -351,12 +459,12 @@ export function ContentView({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between border-b border-zinc-200 pb-3 dark:border-zinc-800">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 pb-3 dark:border-zinc-800">
         <div>
           <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
             Content-Generierung
           </h3>
-          <div className="mt-1 flex gap-3 text-xs text-zinc-500">
+          <div className="mt-1 flex flex-wrap gap-3 text-xs text-zinc-500">
             <span>
               Texte: {done}/{total} Module {running && "· läuft…"}
             </span>
@@ -366,14 +474,22 @@ export function ContentView({
                 {imagesRunning && "· läuft…"}
               </span>
             )}
+            {refImageUrls.length > 0 && (
+              <span className="text-zinc-400">
+                Referenz: erstes Produktbild
+              </span>
+            )}
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button
             type="button"
             onClick={runAllImages}
             disabled={
-              imagesRunning || running || done === 0 || imagesDone === imagesTotal
+              imagesRunning ||
+              running ||
+              done === 0 ||
+              (imagesTotal > 0 && imagesDone === imagesTotal)
             }
           >
             {imagesRunning
@@ -398,6 +514,22 @@ export function ContentView({
         </div>
       </div>
 
+      {lastError && (
+        <div className="flex items-start justify-between gap-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+          <div className="min-w-0 flex-1">
+            <div className="font-medium">Letzter Bild-Fehler</div>
+            <div className="mt-1 break-all font-mono text-xs">{lastError}</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setLastError(null)}
+            className="text-xs text-red-600 hover:text-red-900 dark:text-red-300 dark:hover:text-red-100"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {slots.map((slot, i) => (
         <ModuleSection
           key={slot.item.id}
@@ -405,23 +537,45 @@ export function ContentView({
           index={i}
           onRetry={() => generateOne(i)}
           retryDisabled={slot.status === "generating"}
+          onSetText={(fieldId, val) => setTextValue(i, fieldId, val)}
+          onSetPrompt={(fieldId, val, itemIdx) =>
+            setImagePrompt(i, fieldId, val, itemIdx)
+          }
+          onSetAlt={(fieldId, val, itemIdx) =>
+            setImageAlt(i, fieldId, val, itemIdx)
+          }
+          onSetCaption={(fieldId, val, itemIdx) =>
+            setImageCaption(i, fieldId, val, itemIdx)
+          }
+          onRegenerateImage={(fieldId, itemIdx) =>
+            regenerateOneImage(i, fieldId, itemIdx)
+          }
+          imagesRunning={imagesRunning}
         />
       ))}
     </div>
   );
 }
 
-function ModuleSection({
-  slot,
-  index,
-  onRetry,
-  retryDisabled,
-}: {
+// =====================================================================
+// ModuleSection
+// =====================================================================
+
+type SectionProps = {
   slot: SlotState;
   index: number;
   onRetry: () => void;
   retryDisabled: boolean;
-}) {
+  onSetText: (fieldId: string, value: string) => void;
+  onSetPrompt: (fieldId: string, value: string, itemIndex?: number) => void;
+  onSetAlt: (fieldId: string, value: string, itemIndex?: number) => void;
+  onSetCaption: (fieldId: string, value: string, itemIndex: number) => void;
+  onRegenerateImage: (fieldId: string, itemIndex?: number) => Promise<void>;
+  imagesRunning: boolean;
+};
+
+function ModuleSection(props: SectionProps) {
+  const { slot, index, onRetry, retryDisabled } = props;
   const def = MODULES_BY_TYPE[slot.item.module.type];
   const statusColor = {
     pending: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400",
@@ -494,7 +648,25 @@ function ModuleSection({
               const value = slot.generated!.fields[fdef.id];
               if (!value) return null;
               return (
-                <FieldDisplay key={fdef.id} fdef={fdef} value={value} />
+                <FieldBlock
+                  key={fdef.id}
+                  fdef={fdef}
+                  value={value}
+                  onSetText={(val) => props.onSetText(fdef.id, val)}
+                  onSetPrompt={(val, itemIdx) =>
+                    props.onSetPrompt(fdef.id, val, itemIdx)
+                  }
+                  onSetAlt={(val, itemIdx) =>
+                    props.onSetAlt(fdef.id, val, itemIdx)
+                  }
+                  onSetCaption={(val, itemIdx) =>
+                    props.onSetCaption(fdef.id, val, itemIdx)
+                  }
+                  onRegenerateImage={(itemIdx) =>
+                    props.onRegenerateImage(fdef.id, itemIdx)
+                  }
+                  imagesRunning={props.imagesRunning}
+                />
               );
             })}
           </div>
@@ -504,7 +676,31 @@ function ModuleSection({
   );
 }
 
-function FieldDisplay({ fdef, value }: { fdef: FieldDef; value: FieldValue }) {
+// =====================================================================
+// Per-field block (header + body)
+// =====================================================================
+
+type FieldBlockProps = {
+  fdef: FieldDef;
+  value: FieldValue;
+  onSetText: (value: string) => void;
+  onSetPrompt: (value: string, itemIndex?: number) => void;
+  onSetAlt: (value: string, itemIndex?: number) => void;
+  onSetCaption: (value: string, itemIndex: number) => void;
+  onRegenerateImage: (itemIndex?: number) => Promise<void>;
+  imagesRunning: boolean;
+};
+
+function FieldBlock({
+  fdef,
+  value,
+  onSetText,
+  onSetPrompt,
+  onSetAlt,
+  onSetCaption,
+  onRegenerateImage,
+  imagesRunning,
+}: FieldBlockProps) {
   return (
     <div>
       <div className="mb-1 flex items-baseline gap-2">
@@ -518,24 +714,58 @@ function FieldDisplay({ fdef, value }: { fdef: FieldDef; value: FieldValue }) {
           <div className="text-[10px] text-zinc-400">Pflicht</div>
         )}
       </div>
-      <FieldBody fdef={fdef} value={value} />
+      <FieldBody
+        fdef={fdef}
+        value={value}
+        onSetText={onSetText}
+        onSetPrompt={onSetPrompt}
+        onSetAlt={onSetAlt}
+        onSetCaption={onSetCaption}
+        onRegenerateImage={onRegenerateImage}
+        imagesRunning={imagesRunning}
+      />
     </div>
   );
 }
 
-function FieldBody({ fdef, value }: { fdef: FieldDef; value: FieldValue }) {
+function FieldBody({
+  fdef,
+  value,
+  onSetText,
+  onSetPrompt,
+  onSetAlt,
+  onSetCaption,
+  onRegenerateImage,
+  imagesRunning,
+}: FieldBlockProps) {
   switch (value.kind) {
     case "text":
-      return <TextDisplay value={value} max={fdef.maxChars} />;
+      return <TextEditor value={value} max={fdef.maxChars} onChange={onSetText} />;
     case "richtext":
-      return <RichTextDisplay value={value} max={fdef.maxChars} />;
+      return (
+        <RichTextEditor value={value} max={fdef.maxChars} onChange={onSetText} />
+      );
     case "image":
-      return <ImageSlot value={value} spec={fdef.image} />;
+      return (
+        <ImageSlot
+          value={value}
+          spec={fdef.image}
+          onSetPrompt={(v) => onSetPrompt(v)}
+          onSetAlt={(v) => onSetAlt(v)}
+          onRegenerate={() => onRegenerateImage()}
+          regenerateDisabled={imagesRunning || value.status === "generating"}
+        />
+      );
     case "imageList":
       return (
         <ImageListSlot
           value={value}
           itemSpec={fdef.imageList?.itemImage}
+          onSetPrompt={(v, i) => onSetPrompt(v, i)}
+          onSetAlt={(v, i) => onSetAlt(v, i)}
+          onSetCaption={(v, i) => onSetCaption(v, i)}
+          onRegenerate={(i) => onRegenerateImage(i)}
+          regenerateDisabled={imagesRunning}
         />
       );
     case "specTable":
@@ -549,54 +779,136 @@ function FieldBody({ fdef, value }: { fdef: FieldDef; value: FieldValue }) {
   }
 }
 
-function TextDisplay({ value, max }: { value: TextField; max?: number }) {
-  const empty = value.value.length === 0;
+// =====================================================================
+// Editors
+// =====================================================================
+
+function EditableArea({
+  value,
+  onChange,
+  multiline = true,
+  max,
+  placeholder,
+  monospace = false,
+  rows,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  multiline?: boolean;
+  max?: number;
+  placeholder?: string;
+  monospace?: boolean;
+  rows?: number;
+}) {
+  const [draft, setDraft] = useState(value);
+  // Re-sync wenn externer Wert ändert (z.B. nach Re-Generierung)
+  useEffect(() => setDraft(value), [value]);
+
+  const commit = () => {
+    if (draft !== value) onChange(draft);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      setDraft(value);
+      (e.target as HTMLElement).blur();
+    }
+    if (!multiline && e.key === "Enter") {
+      e.preventDefault();
+      commit();
+      (e.target as HTMLElement).blur();
+    }
+  };
+
+  const baseCls = `w-full resize-y rounded border border-transparent bg-transparent p-2 text-sm focus:border-blue-500 focus:bg-white focus:outline-none dark:focus:bg-zinc-950 ${
+    monospace ? "font-mono text-xs" : ""
+  }`;
+
+  const computedRows =
+    rows ?? Math.max(2, Math.min(12, draft.split("\n").length));
+
   return (
-    <div className="group relative rounded-md border border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
-      {empty ? (
-        <div className="text-sm italic text-zinc-400">
-          (leer — Text wird ins Bild gerendert)
-        </div>
+    <>
+      {multiline ? (
+        <textarea
+          value={draft}
+          onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
+            setDraft(e.target.value)
+          }
+          onBlur={commit}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          rows={computedRows}
+          className={baseCls}
+        />
       ) : (
-        <div className="text-sm text-zinc-900 dark:text-zinc-100">
-          {value.value}
+        <input
+          type="text"
+          value={draft}
+          onChange={(e: ChangeEvent<HTMLInputElement>) =>
+            setDraft(e.target.value)
+          }
+          onBlur={commit}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          className={baseCls.replace("resize-y ", "")}
+        />
+      )}
+      {max && (
+        <div
+          className={`mt-1 text-[10px] ${
+            draft.length > max ? "text-red-500" : "text-zinc-400"
+          }`}
+        >
+          {draft.length}/{max} Zeichen
         </div>
       )}
-      <CopyButton text={value.value} disabled={empty} />
-      {max && !empty && (
-        <div className="mt-1 text-[10px] text-zinc-400">
-          {value.value.length}/{max} Zeichen
-        </div>
-      )}
+    </>
+  );
+}
+
+function TextEditor({
+  value,
+  max,
+  onChange,
+}: {
+  value: TextField;
+  max?: number;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="group relative rounded-md border border-zinc-200 bg-zinc-50 p-1 dark:border-zinc-800 dark:bg-zinc-900/50">
+      <EditableArea
+        value={value.value}
+        onChange={onChange}
+        multiline={false}
+        max={max}
+        placeholder="(leer — Text wird ins Bild gerendert)"
+      />
+      <CopyButton text={value.value} disabled={value.value.length === 0} />
     </div>
   );
 }
 
-function RichTextDisplay({
+function RichTextEditor({
   value,
   max,
+  onChange,
 }: {
   value: RichTextField;
   max?: number;
+  onChange: (v: string) => void;
 }) {
-  const empty = value.value.length === 0;
   return (
-    <div className="group relative rounded-md border border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
-      {empty ? (
-        <div className="text-sm italic text-zinc-400">
-          (leer — Text wird ins Bild gerendert)
-        </div>
-      ) : (
-        <pre className="whitespace-pre-wrap font-sans text-sm text-zinc-900 dark:text-zinc-100">
-          {value.value}
-        </pre>
-      )}
-      <CopyButton text={value.value} disabled={empty} />
-      {max && !empty && (
-        <div className="mt-1 text-[10px] text-zinc-400">
-          {value.value.length}/{max} Zeichen
-        </div>
-      )}
+    <div className="group relative rounded-md border border-zinc-200 bg-zinc-50 p-1 dark:border-zinc-800 dark:bg-zinc-900/50">
+      <EditableArea
+        value={value.value}
+        onChange={onChange}
+        multiline
+        max={max}
+        placeholder="(leer — Text wird ins Bild gerendert)"
+      />
+      <CopyButton text={value.value} disabled={value.value.length === 0} />
     </div>
   );
 }
@@ -604,9 +916,17 @@ function RichTextDisplay({
 function ImageSlot({
   value,
   spec,
+  onSetPrompt,
+  onSetAlt,
+  onRegenerate,
+  regenerateDisabled,
 }: {
   value: ImageField;
   spec?: { widthPx: number; heightPx: number; aspectRatio: string };
+  onSetPrompt: (v: string) => void;
+  onSetAlt: (v: string) => void;
+  onRegenerate: () => void;
+  regenerateDisabled: boolean;
 }) {
   return (
     <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900/50">
@@ -616,12 +936,33 @@ function ImageSlot({
             ? `${spec.widthPx}×${spec.heightPx} (${spec.aspectRatio})`
             : "Bild"}
         </span>
-        <StatusBadge status={value.status} />
+        <div className="flex items-center gap-2">
+          <StatusBadge status={value.status} />
+          <button
+            type="button"
+            onClick={onRegenerate}
+            disabled={regenerateDisabled}
+            className="text-[10px] text-zinc-500 hover:text-zinc-900 disabled:opacity-30 dark:hover:text-zinc-100"
+          >
+            ↻ Bild generieren
+          </button>
+        </div>
       </div>
       <ImagePreview src={value.src} status={value.status} alt={value.altText} />
-      <div className="mt-2 grid gap-2">
-        <PromptBlock label="Prompt (EN)" text={value.prompt} />
-        <PromptBlock label="Alt-Text (DE)" text={value.altText} />
+      <div className="mt-2 space-y-2">
+        <EditableBlock
+          label="Prompt (EN)"
+          value={value.prompt}
+          onChange={onSetPrompt}
+          multiline
+          monospace
+        />
+        <EditableBlock
+          label="Alt-Text (DE)"
+          value={value.altText}
+          onChange={onSetAlt}
+          multiline={false}
+        />
       </div>
     </div>
   );
@@ -630,9 +971,19 @@ function ImageSlot({
 function ImageListSlot({
   value,
   itemSpec,
+  onSetPrompt,
+  onSetAlt,
+  onSetCaption,
+  onRegenerate,
+  regenerateDisabled,
 }: {
   value: ImageListField;
   itemSpec?: { widthPx: number; heightPx: number; aspectRatio: string };
+  onSetPrompt: (v: string, i: number) => void;
+  onSetAlt: (v: string, i: number) => void;
+  onSetCaption: (v: string, i: number) => void;
+  onRegenerate: (i: number) => void;
+  regenerateDisabled: boolean;
 }) {
   return (
     <div className="space-y-3">
@@ -647,29 +998,79 @@ function ImageListSlot({
               {itemSpec &&
                 `· ${itemSpec.widthPx}×${itemSpec.heightPx} (${itemSpec.aspectRatio})`}
             </span>
-            <StatusBadge status={item.status} />
+            <div className="flex items-center gap-2">
+              <StatusBadge status={item.status} />
+              <button
+                type="button"
+                onClick={() => onRegenerate(i)}
+                disabled={regenerateDisabled || item.status === "generating"}
+                className="text-[10px] text-zinc-500 hover:text-zinc-900 disabled:opacity-30 dark:hover:text-zinc-100"
+              >
+                ↻ Bild generieren
+              </button>
+            </div>
           </div>
-          <ImagePreview
-            src={item.src}
-            status={item.status}
-            alt={item.altText}
-          />
-          {item.caption && (
+          <ImagePreview src={item.src} status={item.status} alt={item.altText} />
+          {item.caption !== undefined && (
             <div className="mt-2">
-              <div className="text-[10px] uppercase tracking-wider text-zinc-500">
-                Caption
-              </div>
-              <div className="text-sm text-zinc-900 dark:text-zinc-100">
-                {item.caption}
-              </div>
+              <EditableBlock
+                label="Caption"
+                value={item.caption}
+                onChange={(v) => onSetCaption(v, i)}
+                multiline={false}
+              />
             </div>
           )}
-          <div className="mt-2 grid gap-2">
-            <PromptBlock label="Prompt (EN)" text={item.prompt} />
-            <PromptBlock label="Alt-Text (DE)" text={item.altText} />
+          <div className="mt-2 space-y-2">
+            <EditableBlock
+              label="Prompt (EN)"
+              value={item.prompt}
+              onChange={(v) => onSetPrompt(v, i)}
+              multiline
+              monospace
+            />
+            <EditableBlock
+              label="Alt-Text (DE)"
+              value={item.altText}
+              onChange={(v) => onSetAlt(v, i)}
+              multiline={false}
+            />
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function EditableBlock({
+  label,
+  value,
+  onChange,
+  multiline,
+  monospace = false,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  multiline: boolean;
+  monospace?: boolean;
+}) {
+  return (
+    <div className="rounded border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-950">
+      <div className="flex items-center justify-between border-b border-zinc-100 px-2 py-1 dark:border-zinc-800">
+        <span className="text-[10px] uppercase tracking-wider text-zinc-500">
+          {label}
+        </span>
+        <CopyButton text={value} inline />
+      </div>
+      <div className="px-1 py-0.5">
+        <EditableArea
+          value={value}
+          onChange={onChange}
+          multiline={multiline}
+          monospace={monospace}
+        />
+      </div>
     </div>
   );
 }
@@ -763,22 +1164,6 @@ function SpecTableDisplay({ value }: { value: SpecTableField }) {
           ))}
         </tbody>
       </table>
-    </div>
-  );
-}
-
-function PromptBlock({ label, text }: { label: string; text: string }) {
-  return (
-    <div className="rounded border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-950">
-      <div className="flex items-center justify-between border-b border-zinc-100 px-2 py-1 dark:border-zinc-800">
-        <span className="text-[10px] uppercase tracking-wider text-zinc-500">
-          {label}
-        </span>
-        <CopyButton text={text} inline />
-      </div>
-      <div className="px-2 py-1.5 text-xs text-zinc-800 dark:text-zinc-300">
-        {text}
-      </div>
     </div>
   );
 }
