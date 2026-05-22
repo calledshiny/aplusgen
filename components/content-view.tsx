@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   MODULES_BY_TYPE,
+  type AspectRatio,
   type FieldDef,
   type ModuleType,
 } from "@/lib/modules";
@@ -48,7 +49,12 @@ export function ContentView({
     story.map((item) => ({ item, status: "pending" })),
   );
   const [running, setRunning] = useState(false);
+  const [imagesRunning, setImagesRunning] = useState(false);
   const cancelRef = useRef(false);
+
+  // Default: erstes Produktbild als Referenz für alle Bild-Generierungen.
+  // (Spec sieht eigentlich User-Auswahl vor — V1 simpel.)
+  const refImageUrls = scraped.images.slice(0, 1);
 
   const generateOne = useCallback(
     async (index: number) => {
@@ -131,8 +137,190 @@ export function ContentView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // --- Bild-Generierung ------------------------------------------------
+  const updateSlotField = useCallback(
+    (
+      slotIndex: number,
+      fieldId: string,
+      updater: (v: FieldValue) => FieldValue,
+    ) => {
+      setSlots((prev) =>
+        prev.map((s, i) => {
+          if (i !== slotIndex || !s.generated) return s;
+          const cur = s.generated.fields[fieldId];
+          if (!cur) return s;
+          return {
+            ...s,
+            generated: {
+              ...s.generated,
+              fields: { ...s.generated.fields, [fieldId]: updater(cur) },
+            },
+          };
+        }),
+      );
+    },
+    [],
+  );
+
+  const generateImageForSlot = useCallback(
+    async (
+      slotIndex: number,
+      fieldId: string,
+      prompt: string,
+      aspectRatio: AspectRatio | undefined,
+      textInImage: boolean,
+      itemIndex?: number,
+    ) => {
+      // status: generating
+      updateSlotField(slotIndex, fieldId, (v) => {
+        if (v.kind === "image") return { ...v, status: "generating" };
+        if (v.kind === "imageList" && itemIndex !== undefined) {
+          return {
+            ...v,
+            items: v.items.map((it, i) =>
+              i === itemIndex ? { ...it, status: "generating" } : it,
+            ),
+          };
+        }
+        return v;
+      });
+
+      try {
+        const res = await fetch("/api/generate-image", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt,
+            aspectRatio,
+            resolution: "2k",
+            textInImage,
+            refImageUrls,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          const detail = data.detail || data.error || `HTTP ${res.status}`;
+          updateSlotField(slotIndex, fieldId, (v) => {
+            if (v.kind === "image") return { ...v, status: "error" };
+            if (v.kind === "imageList" && itemIndex !== undefined) {
+              return {
+                ...v,
+                items: v.items.map((it, i) =>
+                  i === itemIndex ? { ...it, status: "error" } : it,
+                ),
+              };
+            }
+            return v;
+          });
+          console.error("Image gen failed:", detail);
+          return;
+        }
+        const url = (data as { url: string }).url;
+        updateSlotField(slotIndex, fieldId, (v) => {
+          if (v.kind === "image")
+            return { ...v, src: url, status: "done" };
+          if (v.kind === "imageList" && itemIndex !== undefined) {
+            return {
+              ...v,
+              items: v.items.map((it, i) =>
+                i === itemIndex ? { ...it, src: url, status: "done" } : it,
+              ),
+            };
+          }
+          return v;
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error("Image gen exception:", message);
+      }
+    },
+    [refImageUrls, updateSlotField],
+  );
+
+  const generateImagesForSlot = useCallback(
+    async (slotIndex: number) => {
+      // Wir lesen aus dem aktuellen state via Closure — kann veraltet sein.
+      // Trick: setSlots-Callback um den aktuellen Snapshot zu kriegen.
+      let snapshot: SlotState[] = [];
+      setSlots((prev) => {
+        snapshot = prev;
+        return prev;
+      });
+      const slot = snapshot[slotIndex];
+      if (!slot?.generated) return;
+      const def = MODULES_BY_TYPE[slot.item.module.type];
+      const textInImage = slot.item.module.textInImage;
+
+      for (const fdef of def.fields) {
+        const val = slot.generated.fields[fdef.id];
+        if (!val) continue;
+
+        if (val.kind === "image") {
+          if (val.src) continue; // already done
+          await generateImageForSlot(
+            slotIndex,
+            fdef.id,
+            val.prompt,
+            fdef.image?.aspectRatio,
+            textInImage,
+          );
+        } else if (val.kind === "imageList") {
+          for (let i = 0; i < val.items.length; i++) {
+            const it = val.items[i];
+            if (it.src) continue;
+            await generateImageForSlot(
+              slotIndex,
+              fdef.id,
+              it.prompt,
+              fdef.imageList?.itemImage.aspectRatio,
+              textInImage,
+              i,
+            );
+          }
+        }
+      }
+    },
+    [generateImageForSlot],
+  );
+
+  const runAllImages = useCallback(async () => {
+    if (imagesRunning) return;
+    setImagesRunning(true);
+    cancelRef.current = false;
+    let snapshot: SlotState[] = [];
+    setSlots((prev) => {
+      snapshot = prev;
+      return prev;
+    });
+    for (let i = 0; i < snapshot.length; i++) {
+      if (cancelRef.current) break;
+      if (snapshot[i]?.status !== "done") continue;
+      await generateImagesForSlot(i);
+    }
+    setImagesRunning(false);
+  }, [generateImagesForSlot, imagesRunning]);
+
   const done = slots.filter((s) => s.status === "done").length;
   const total = slots.length;
+  const imagesDone = slots.reduce((sum, s) => {
+    if (!s.generated) return sum;
+    let n = 0;
+    for (const v of Object.values(s.generated.fields)) {
+      if (v.kind === "image" && v.src) n++;
+      else if (v.kind === "imageList")
+        n += v.items.filter((it) => it.src).length;
+    }
+    return sum + n;
+  }, 0);
+  const imagesTotal = slots.reduce((sum, s) => {
+    if (!s.generated) return sum;
+    let n = 0;
+    for (const v of Object.values(s.generated.fields)) {
+      if (v.kind === "image") n++;
+      else if (v.kind === "imageList") n += v.items.length;
+    }
+    return sum + n;
+  }, 0);
 
   const exportJson = useMemo(() => {
     const payload = {
@@ -168,11 +356,32 @@ export function ContentView({
           <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
             Content-Generierung
           </h3>
-          <div className="mt-1 text-xs text-zinc-500">
-            {done}/{total} Module fertig {running && "· läuft…"}
+          <div className="mt-1 flex gap-3 text-xs text-zinc-500">
+            <span>
+              Texte: {done}/{total} Module {running && "· läuft…"}
+            </span>
+            {done > 0 && (
+              <span>
+                Bilder: {imagesDone}/{imagesTotal}{" "}
+                {imagesRunning && "· läuft…"}
+              </span>
+            )}
           </div>
         </div>
         <div className="flex gap-2">
+          <Button
+            type="button"
+            onClick={runAllImages}
+            disabled={
+              imagesRunning || running || done === 0 || imagesDone === imagesTotal
+            }
+          >
+            {imagesRunning
+              ? "Bilder läuft…"
+              : imagesDone === 0
+                ? "Bilder generieren"
+                : "Restliche Bilder"}
+          </Button>
           <Button type="button" variant="secondary" onClick={downloadJson}>
             JSON exportieren
           </Button>
@@ -407,10 +616,9 @@ function ImageSlot({
             ? `${spec.widthPx}×${spec.heightPx} (${spec.aspectRatio})`
             : "Bild"}
         </span>
-        <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] dark:bg-zinc-800">
-          Bild-Generierung in Phase 5
-        </span>
+        <StatusBadge status={value.status} />
       </div>
+      <ImagePreview src={value.src} status={value.status} alt={value.altText} />
       <div className="mt-2 grid gap-2">
         <PromptBlock label="Prompt (EN)" text={value.prompt} />
         <PromptBlock label="Alt-Text (DE)" text={value.altText} />
@@ -439,10 +647,13 @@ function ImageListSlot({
               {itemSpec &&
                 `· ${itemSpec.widthPx}×${itemSpec.heightPx} (${itemSpec.aspectRatio})`}
             </span>
-            <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] dark:bg-zinc-800">
-              Phase 5
-            </span>
+            <StatusBadge status={item.status} />
           </div>
+          <ImagePreview
+            src={item.src}
+            status={item.status}
+            alt={item.altText}
+          />
           {item.caption && (
             <div className="mt-2">
               <div className="text-[10px] uppercase tracking-wider text-zinc-500">
@@ -461,6 +672,77 @@ function ImageListSlot({
       ))}
     </div>
   );
+}
+
+function StatusBadge({
+  status,
+}: {
+  status: "pending" | "generating" | "done" | "error";
+}) {
+  const map = {
+    pending: { label: "wartet", cls: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400" },
+    generating: { label: "generiert…", cls: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300" },
+    done: { label: "fertig", cls: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300" },
+    error: { label: "fehler", cls: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300" },
+  }[status];
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${map.cls}`}>
+      {map.label}
+    </span>
+  );
+}
+
+function ImagePreview({
+  src,
+  status,
+  alt,
+}: {
+  src?: string;
+  status: "pending" | "generating" | "done" | "error";
+  alt: string;
+}) {
+  if (src) {
+    return (
+      <div className="mt-2 overflow-hidden rounded-md border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-950">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={src}
+          alt={alt}
+          className="block max-h-96 w-full object-contain"
+        />
+        <div className="border-t border-zinc-200 px-2 py-1 text-right text-[10px] dark:border-zinc-800">
+          <a
+            href={src}
+            target="_blank"
+            rel="noreferrer"
+            className="text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+          >
+            ↗ Original (PNG, 2k)
+          </a>
+        </div>
+      </div>
+    );
+  }
+  if (status === "generating") {
+    return (
+      <div className="mt-2 flex aspect-square items-center justify-center rounded-md border border-dashed border-zinc-300 bg-white dark:border-zinc-700 dark:bg-zinc-900">
+        <div className="flex flex-col items-center gap-2 text-sm text-zinc-500">
+          <span className="size-3 animate-pulse rounded-full bg-blue-500" />
+          Higgsfield generiert…
+        </div>
+      </div>
+    );
+  }
+  if (status === "error") {
+    return (
+      <div className="mt-2 flex aspect-square items-center justify-center rounded-md border border-red-300 bg-red-50 dark:border-red-900 dark:bg-red-950/40">
+        <div className="text-sm text-red-600 dark:text-red-300">
+          Generierung fehlgeschlagen
+        </div>
+      </div>
+    );
+  }
+  return null;
 }
 
 function SpecTableDisplay({ value }: { value: SpecTableField }) {
