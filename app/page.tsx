@@ -7,24 +7,18 @@ export default function Home() {
       <div className="mx-auto max-w-3xl">
         <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-zinc-300 bg-white px-3 py-1 text-xs font-medium text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400">
           <span className="size-2 rounded-full bg-emerald-500" />
-          Phase 2 · Scraping
+          Phase 3 · Analyse + Modul-Auswahl
         </div>
         <h1 className="mt-4 text-4xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
           A+ Content Generator
         </h1>
         <p className="mt-3 max-w-xl text-base leading-7 text-zinc-600 dark:text-zinc-400">
-          Amazon-URL einfügen, Produkt-Daten werden gescraped (Titel, Bullets,
-          Specs, Hi-Res-Bilder).
+          Amazon-URL oder ASIN → Daten werden gescraped, Claude analysiert das
+          Produkt und schlägt eine Storyline aus den 17 A+ Modulen vor.
         </p>
 
         <section className="mt-8 rounded-2xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
-          <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-            Produkt scrapen
-          </h2>
-          <p className="mt-1 text-xs text-zinc-500">
-            POST /api/scrape · Playwright + Chromium
-          </p>
-          <div className="mt-4">
+          <div className="mt-1">
             <ScrapeForm />
           </div>
         </section>
