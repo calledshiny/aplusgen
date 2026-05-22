@@ -30,6 +30,8 @@ type Item = {
   id: string; // stable per slot
   type: ModuleType;
   reasoning: string;
+  textInImage: boolean;
+  imageBrief: string;
 };
 
 let counter = 0;
@@ -40,6 +42,8 @@ function toItems(plan: AplusPlan): Item[] {
     id: nextId(),
     type: m.type,
     reasoning: m.reasoning,
+    textInImage: m.textInImage,
+    imageBrief: m.imageBrief,
   }));
 }
 
@@ -75,8 +79,22 @@ export function PlanView({ plan }: { plan: AplusPlan }) {
   function addModule(type: ModuleType) {
     setItems((prev) => [
       ...prev,
-      { id: nextId(), type, reasoning: "(manuell hinzugefügt)" },
+      {
+        id: nextId(),
+        type,
+        reasoning: "(manuell hinzugefügt)",
+        textInImage: true,
+        imageBrief: "",
+      },
     ]);
+  }
+
+  function toggleTextInImage(id: string) {
+    setItems((prev) =>
+      prev.map((i) =>
+        i.id === id ? { ...i, textInImage: !i.textInImage } : i,
+      ),
+    );
   }
 
   const totalImages = useMemo(
@@ -119,6 +137,7 @@ export function PlanView({ plan }: { plan: AplusPlan }) {
                   index={index}
                   onRemove={() => removeItem(item.id)}
                   onChangeType={(t) => changeType(item.id, t)}
+                  onToggleTextInImage={() => toggleTextInImage(item.id)}
                 />
               ))}
             </ul>
@@ -196,11 +215,13 @@ function ModuleCard({
   index,
   onRemove,
   onChangeType,
+  onToggleTextInImage,
 }: {
   item: Item;
   index: number;
   onRemove: () => void;
   onChangeType: (t: ModuleType) => void;
+  onToggleTextInImage: () => void;
 }) {
   const {
     attributes,
@@ -242,7 +263,7 @@ function ModuleCard({
         </div>
 
         <div className="min-w-0 flex-1">
-          <div className="flex items-baseline gap-2">
+          <div className="flex flex-wrap items-baseline gap-2">
             <div className="truncate font-medium text-zinc-900 dark:text-zinc-100">
               {def.name}
             </div>
@@ -254,10 +275,28 @@ function ModuleCard({
             <span className="text-xs text-zinc-500">
               {imgCount} Bild{imgCount === 1 ? "" : "er"}
             </span>
+            <button
+              type="button"
+              onClick={onToggleTextInImage}
+              title="Text wird beim Bild als Typografie eingebrannt statt in Text-Felder geschrieben (Mobile-first)"
+              className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                item.textInImage
+                  ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300 dark:hover:bg-emerald-900/60"
+                  : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700"
+              }`}
+            >
+              {item.textInImage ? "Text im Bild" : "Echter Text"}
+            </button>
           </div>
           <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
             {item.reasoning}
           </p>
+          {item.imageBrief && (
+            <p className="mt-2 rounded border-l-2 border-zinc-200 bg-zinc-50 px-2 py-1 text-xs italic text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400">
+              <span className="not-italic font-medium text-zinc-500">Bild: </span>
+              {item.imageBrief}
+            </p>
+          )}
         </div>
 
         <div className="flex shrink-0 flex-col items-end gap-1">
