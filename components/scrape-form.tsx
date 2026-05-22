@@ -15,14 +15,14 @@ type ScrapedProduct = {
 };
 
 export function ScrapeForm() {
-  const [url, setUrl] = useState("");
+  const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ScrapedProduct | null>(null);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!url.trim() || loading) return;
+    if (!input.trim() || loading) return;
     setLoading(true);
     setError(null);
     setResult(null);
@@ -30,7 +30,7 @@ export function ScrapeForm() {
       const res = await fetch("/api/scrape", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: url.trim() }),
+        body: JSON.stringify({ input: input.trim() }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -49,14 +49,14 @@ export function ScrapeForm() {
     <div>
       <form onSubmit={onSubmit} className="flex gap-2">
         <input
-          type="url"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          placeholder="https://www.amazon.de/dp/..."
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="Amazon-URL oder ASIN (z.B. B07XJ8C8F5)"
           required
           className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm shadow-sm placeholder:text-zinc-400 focus:border-zinc-900 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:placeholder:text-zinc-500 dark:focus:border-zinc-100"
         />
-        <Button type="submit" disabled={loading || !url.trim()}>
+        <Button type="submit" disabled={loading || !input.trim()}>
           {loading ? "Lädt…" : "Scrapen"}
         </Button>
       </form>

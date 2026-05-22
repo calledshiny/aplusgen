@@ -1,29 +1,31 @@
 import { NextResponse } from "next/server";
-import { isAmazonUrl, scrapeAmazon } from "@/lib/scraper";
+import { isAmazonUrl, normalizeProductInput, scrapeAmazon } from "@/lib/scraper";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
-  let body: { url?: string };
+  let body: { input?: string; url?: string };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const url = body.url?.trim();
-  if (!url) {
+  const raw = (body.input ?? body.url ?? "").trim();
+  if (!raw) {
     return NextResponse.json(
-      { error: "`url` is required (string)" },
+      { error: "`input` is required (Amazon URL or ASIN)" },
       { status: 400 },
     );
   }
+
+  const url = normalizeProductInput(raw);
   if (!isAmazonUrl(url)) {
     return NextResponse.json(
       {
         error:
-          "URL must point to amazon.de, amazon.com, or another supported Amazon domain",
+          "Input must be a 10-character ASIN or an Amazon URL (amazon.de, .com, .co.uk, …)",
       },
       { status: 400 },
     );

@@ -42,6 +42,18 @@ function uniq<T>(arr: T[]): T[] {
   return Array.from(new Set(arr));
 }
 
+const ASIN_RE = /^[A-Z0-9]{10}$/;
+
+// Akzeptiert: vollständige Amazon-URL, oder reine ASIN (10 Zeichen alphanumerisch).
+// Gibt kanonische amazon.de-URL zurück.
+export function normalizeProductInput(input: string): string {
+  const trimmed = input.trim();
+  if (ASIN_RE.test(trimmed)) {
+    return `https://www.amazon.de/dp/${trimmed}`;
+  }
+  return trimmed;
+}
+
 export async function scrapeAmazon(url: string): Promise<ScrapedProduct> {
   if (!isAmazonUrl(url)) {
     throw new Error(`Not an Amazon URL: ${url}`);
@@ -150,40 +162,51 @@ export async function scrapeAmazon(url: string): Promise<ScrapedProduct> {
         }
       });
 
-      // Bilder — Hi-Res aus data-a-dynamic-image JSON sammeln, dann alt-images
+      // Bilder — NUR aus der offiziellen Produktgalerie (#imageBlock /
+      // #main-image-container / #altImages). Damit ignorieren wir
+      // "Sponsored", "Kunden kauften auch", "From the brand" usw.
       const imageUrls = new Set<string>();
 
-      // Hauptbild + Slider: aus data-a-dynamic-image (JSON map url->[w,h])
-      $$("img[data-a-dynamic-image]").forEach((img) => {
+      const galleryRoots = [
+        "#imageBlock",
+        "#main-image-container",
+        "#altImages",
+        "#imgTagWrapperId",
+      ]
+        .map((sel) => document.querySelector(sel))
+        .filter((el): el is Element => el !== null);
+
+      const pickFromDynamicImage = (img: Element) => {
         const raw = img.getAttribute("data-a-dynamic-image");
-        if (!raw) return;
+        if (!raw) return null;
         try {
           const map = JSON.parse(raw) as Record<string, [number, number]>;
-          // pick largest by area
           let best: { url: string; area: number } | null = null;
           for (const [u, dims] of Object.entries(map)) {
             const area = (dims[0] ?? 0) * (dims[1] ?? 0);
             if (!best || area > best.area) best = { url: u, area };
           }
-          if (best) imageUrls.add(best.url);
+          return best?.url ?? null;
         } catch {
-          /* ignore */
+          return null;
         }
-      });
+      };
 
-      // Fallback: alt-image thumbnails
-      $$("#altImages li.item img, #altImages img.a-button-thumbnail-image").forEach(
-        (img) => {
-          const src = img.getAttribute("src");
-          if (src) imageUrls.add(src);
-        },
-      );
-
-      // Main image direct fallback
-      const mainImg = $("#imgTagWrapperId img, #landingImage");
-      if (mainImg) {
-        const src = mainImg.getAttribute("src");
-        if (src) imageUrls.add(src);
+      for (const root of galleryRoots) {
+        // data-a-dynamic-image bevorzugt (höchste Auflösung)
+        root.querySelectorAll("img[data-a-dynamic-image]").forEach((img) => {
+          const u = pickFromDynamicImage(img);
+          if (u) imageUrls.add(u);
+        });
+        // Thumbnails als Fallback (werden später via toHiRes hochskaliert)
+        root
+          .querySelectorAll(
+            "li.item img, img.a-button-thumbnail-image, #landingImage",
+          )
+          .forEach((img) => {
+            const src = img.getAttribute("src");
+            if (src) imageUrls.add(src);
+          });
       }
 
       // Marke
